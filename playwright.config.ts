@@ -69,10 +69,13 @@ export default defineConfig({
     // },
   ],
 
-  /* Run your local dev server before starting the tests */
-  // webServer: {
-  //   command: 'npm run start',
-  //   url: 'http://127.0.0.1:3000',
-  //   reuseExistingServer: !process.env.CI,
-  // },
+  /* Auto-start the mock web server before running E2E tests */
+  webServer: {
+    command: 'node mock-app/server.js',
+    url: 'http://127.0.0.1:3000',
+    reuseExistingServer: !process.env.CI,
+    timeout: 15_000,
+    stdout: 'pipe',
+    stderr: 'pipe',
+  },
 });

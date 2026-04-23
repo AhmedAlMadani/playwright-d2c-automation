@@ -13,7 +13,7 @@ export class LandingPage {
   }
 
   async clickSignUp(): Promise<void> {
-    await this.page.getByRole('link', { name: 'Sign Up' }).click();
+    await this.page.getByRole('link', { name: 'Get Started' }).click();
   }
 
   async clickLogin(): Promise<void> {

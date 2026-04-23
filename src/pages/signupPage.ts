@@ -15,8 +15,8 @@ export class SignupPage {
 
   async signup(user: User): Promise<void> {
     await this.page.getByLabel('Email').fill(user.email);
-    await this.page.getByLabel('Password').fill(user.password || 'password123'); // Assuming a default password if not provided
-    await this.page.getByLabel('Confirm Password').fill(user.password || 'password123');
+    await this.page.getByLabel('Password', { exact: true }).fill(user.password ?? 'password123'); // Assuming a default password if not provided
+    await this.page.getByLabel('Confirm Password').fill(user.password ?? 'password123');
     await this.page.getByRole('button', { name: 'Sign Up' }).click();
   }
 

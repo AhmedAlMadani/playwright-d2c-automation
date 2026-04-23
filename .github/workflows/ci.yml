@@ -1,0 +1,163 @@
+name: CI – Playwright D2C Automation
+
+on:
+  push:
+    branches: [main, develop, 'feature/**']
+  pull_request:
+    branches: [main, develop]
+
+# Cancel in-progress runs on the same branch when a newer commit is pushed
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # ────────────────────────────────────────────────────────────────────────────
+  # Job 1: Type-check – fast gate before running expensive E2E tests
+  # ────────────────────────────────────────────────────────────────────────────
+  typecheck:
+    name: TypeScript – Type Check
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Run TypeScript type check
+        run: npm run typecheck
+
+  # ────────────────────────────────────────────────────────────────────────────
+  # Job 2: Smoke Tests – critical path, runs on every push (fast)
+  # ────────────────────────────────────────────────────────────────────────────
+  smoke:
+    name: Smoke Tests (@smoke)
+    runs-on: ubuntu-latest
+    needs: typecheck
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Install Playwright browsers
+        run: npx playwright install --with-deps chromium
+
+      - name: Run smoke tests
+        run: npm run test:smoke
+        env:
+          BASE_URL: ${{ vars.BASE_URL || 'http://localhost:3000' }}
+          API_URL: ${{ vars.API_URL || 'http://localhost:3001' }}
+          CI: true
+
+      - name: Upload smoke test report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: smoke-report-${{ github.run_id }}
+          path: playwright-report/
+          retention-days: 7
+
+  # ────────────────────────────────────────────────────────────────────────────
+  # Job 3: Full Regression – all tests, all browsers (PRs to main/develop)
+  # ────────────────────────────────────────────────────────────────────────────
+  regression:
+    name: Regression Tests (@regression)
+    runs-on: ubuntu-latest
+    needs: typecheck
+    # Only run full regression on PRs and pushes to protected branches
+    if: >
+      github.event_name == 'pull_request' ||
+      (github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/develop'))
+    strategy:
+      fail-fast: false
+      matrix:
+        browser: [chromium, firefox, webkit]
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Install Playwright browsers
+        run: npx playwright install --with-deps ${{ matrix.browser }}
+
+      - name: Run regression tests (${{ matrix.browser }})
+        run: npx playwright test --project=${{ matrix.browser }} --grep @regression
+        env:
+          BASE_URL: ${{ vars.BASE_URL || 'http://localhost:3000' }}
+          API_URL: ${{ vars.API_URL || 'http://localhost:3001' }}
+          CI: true
+
+      - name: Upload regression report (${{ matrix.browser }})
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: regression-report-${{ matrix.browser }}-${{ github.run_id }}
+          path: playwright-report/
+          retention-days: 14
+
+      - name: Upload test traces on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-traces-${{ matrix.browser }}-${{ github.run_id }}
+          path: test-results/
+          retention-days: 7
+
+  # ────────────────────────────────────────────────────────────────────────────
+  # Job 4: API-only Tests (fast, no browser needed)
+  # ────────────────────────────────────────────────────────────────────────────
+  api-tests:
+    name: API Tests
+    runs-on: ubuntu-latest
+    needs: typecheck
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Install Playwright (Chromium only for API tests)
+        run: npx playwright install --with-deps chromium
+
+      - name: Run API tests
+        run: npm run test:api
+        env:
+          CI: true
+
+      - name: Upload API test report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: api-test-report-${{ github.run_id }}
+          path: playwright-report/
+          retention-days: 7
