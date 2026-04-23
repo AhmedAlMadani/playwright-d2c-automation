@@ -58,7 +58,7 @@ jobs:
         run: npx playwright install --with-deps chromium
 
       - name: Run smoke tests
-        run: npm run test:smoke
+        run: npx playwright test --project=chromium --grep @smoke
         env:
           BASE_URL: ${{ vars.BASE_URL || 'http://localhost:3000' }}
           API_URL: ${{ vars.API_URL || 'http://localhost:3001' }}
