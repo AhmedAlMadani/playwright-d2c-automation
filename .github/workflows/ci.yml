@@ -5,6 +5,9 @@ on:
     branches: [main, develop, 'feature/**']
   pull_request:
     branches: [main, develop]
+  schedule:
+    # Nightly regression run – every day at 00:00 UTC (03:00 local time)
+    - cron: '0 0 * * *'
 
 # Cancel in-progress runs on the same branch when a newer commit is pushed
 concurrency:
@@ -81,6 +84,7 @@ jobs:
     needs: typecheck
     # Only run full regression on PRs and pushes to protected branches
     if: >
+      github.event_name == 'schedule' ||
       github.event_name == 'pull_request' ||
       (github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/develop'))
     strategy:
