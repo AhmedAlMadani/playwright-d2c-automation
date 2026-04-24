@@ -11,10 +11,18 @@ app.use(express.urlencoded({ extended: true }));
 app.use(express.json());
 
 // ── Supabase client (server-side, anon key — same as test layer) ─────────────
-const supabase = createClient(
-  process.env.SUPABASE_URL  || '',
-  process.env.SUPABASE_ANON_KEY || '',
-);
+const SUPABASE_URL      = process.env.SUPABASE_URL      || '';
+const SUPABASE_ANON_KEY = process.env.SUPABASE_ANON_KEY || '';
+
+if (!SUPABASE_URL || !SUPABASE_ANON_KEY) {
+  console.error('[mock-app] ❌  SUPABASE_URL and SUPABASE_ANON_KEY are required.');
+  console.error('[mock-app]     • Local: add them to your .env file');
+  console.error('[mock-app]     • CI:    add them as Repository Secrets in GitHub');
+  console.error('[mock-app]             Settings → Secrets → Actions → SUPABASE_URL / SUPABASE_ANON_KEY');
+  process.exit(1);
+}
+
+const supabase = createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
 
 // ── Session store (UI auth only — no subscription state held here) ───────────
 const sessions = new Map();
