@@ -14,9 +14,18 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
+# ── Why all DB-touching jobs are chained sequentially ────────────────────────
+# All test jobs share a single Supabase database. The beforeEach fixture cleans
+# all tables before every test. Running jobs in parallel means one job's cleanup
+# deletes rows another job just created → race condition → flaky failures.
+#
+# Pipeline order: typecheck → smoke → regression → api-tests
+# Each job waits for the previous to finish before touching the DB.
+# ─────────────────────────────────────────────────────────────────────────────
+
 jobs:
   # ────────────────────────────────────────────────────────────────────────────
-  # Job 1: Type-check – fast gate before running expensive E2E tests
+  # Job 1: Type-check – fast gate, no DB access
   # ────────────────────────────────────────────────────────────────────────────
   typecheck:
     name: TypeScript – Type Check
@@ -38,7 +47,8 @@ jobs:
         run: npm run typecheck
 
   # ────────────────────────────────────────────────────────────────────────────
-  # Job 2: Smoke Tests – critical path, runs on every push (fast)
+  # Job 2: Smoke Tests – critical path, chromium only, every push
+  # Must complete before regression and api-tests start (shared DB).
   # ────────────────────────────────────────────────────────────────────────────
   smoke:
     name: Smoke Tests (@smoke)
@@ -61,7 +71,7 @@ jobs:
         run: npx playwright install --with-deps chromium
 
       - name: Run smoke tests
-        run: npx playwright test --project=chromium --grep @smoke
+        run: npx playwright test --project=chromium --grep @smoke --workers=1
         env:
           BASE_URL: ${{ vars.BASE_URL || 'http://localhost:3000' }}
           API_URL: ${{ vars.API_URL || 'http://localhost:3001' }}
@@ -78,21 +88,24 @@ jobs:
           retention-days: 7
 
   # ────────────────────────────────────────────────────────────────────────────
-  # Job 3: Full Regression – all tests, all browsers (PRs to main/develop)
+  # Job 3: Full Regression – all browsers, sequential steps in ONE job.
+  #
+  # Previously: browser matrix (chromium / firefox / webkit as parallel jobs).
+  # Problem:    All 3 ran simultaneously against the same DB, causing beforeEach
+  #             cleanup in one job to delete rows another job just created.
+  #
+  # Fix:        Single job with three sequential run steps, --workers=1.
+  #             chromium finishes → firefox starts → webkit starts.
+  #             No two browser runs ever overlap on the DB.
   # ────────────────────────────────────────────────────────────────────────────
   regression:
-    name: Regression Tests (@regression)
+    name: Regression Tests (@regression – chromium → firefox → webkit)
     runs-on: ubuntu-latest
-    needs: typecheck
-    # Only run full regression on PRs and pushes to protected branches
+    needs: smoke                         # waits for smoke to finish before touching DB
     if: >
       github.event_name == 'schedule' ||
       github.event_name == 'pull_request' ||
       (github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/develop'))
-    strategy:
-      fail-fast: false
-      matrix:
-        browser: [chromium, firefox, webkit]
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
@@ -106,11 +119,11 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
-      - name: Install Playwright browsers
-        run: npx playwright install --with-deps ${{ matrix.browser }}
+      - name: Install all Playwright browsers
+        run: npx playwright install --with-deps
 
-      - name: Run regression tests (${{ matrix.browser }})
-        run: npx playwright test --project=${{ matrix.browser }} --grep @regression --workers=1
+      - name: Run regression – chromium
+        run: npx playwright test --project=chromium --grep @regression --workers=1
         env:
           BASE_URL: ${{ vars.BASE_URL || 'http://localhost:3000' }}
           API_URL: ${{ vars.API_URL || 'http://localhost:3001' }}
@@ -118,11 +131,29 @@ jobs:
           SUPABASE_ANON_KEY: ${{ secrets.SUPABASE_ANON_KEY }}
           CI: true
 
-      - name: Upload regression report (${{ matrix.browser }})
+      - name: Run regression – firefox
+        run: npx playwright test --project=firefox --grep @regression --workers=1
+        env:
+          BASE_URL: ${{ vars.BASE_URL || 'http://localhost:3000' }}
+          API_URL: ${{ vars.API_URL || 'http://localhost:3001' }}
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_ANON_KEY: ${{ secrets.SUPABASE_ANON_KEY }}
+          CI: true
+
+      - name: Run regression – webkit
+        run: npx playwright test --project=webkit --grep @regression --workers=1
+        env:
+          BASE_URL: ${{ vars.BASE_URL || 'http://localhost:3000' }}
+          API_URL: ${{ vars.API_URL || 'http://localhost:3001' }}
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_ANON_KEY: ${{ secrets.SUPABASE_ANON_KEY }}
+          CI: true
+
+      - name: Upload regression report
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: regression-report-${{ matrix.browser }}-${{ github.run_id }}
+          name: regression-report-${{ github.run_id }}
           path: playwright-report/
           retention-days: 14
 
@@ -130,17 +161,21 @@ jobs:
         if: failure()
         uses: actions/upload-artifact@v4
         with:
-          name: test-traces-${{ matrix.browser }}-${{ github.run_id }}
+          name: test-traces-${{ github.run_id }}
           path: test-results/
           retention-days: 7
 
   # ────────────────────────────────────────────────────────────────────────────
-  # Job 4: API-only Tests (fast, no browser needed)
+  # Job 4: API-only Tests – after regression to prevent DB overlap
   # ────────────────────────────────────────────────────────────────────────────
   api-tests:
     name: API Tests
     runs-on: ubuntu-latest
-    needs: typecheck
+    needs: regression                    # waits for all 3 browser regression runs to finish
+    if: >
+      github.event_name == 'schedule' ||
+      github.event_name == 'pull_request' ||
+      (github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/develop'))
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
@@ -154,7 +189,7 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
-      - name: Install Playwright (Chromium only for API tests)
+      - name: Install Playwright (Chromium only)
         run: npx playwright install --with-deps chromium
 
       - name: Run API tests
