@@ -1,6 +1,8 @@
 'use strict';
-const express = require('express');
-const crypto  = require('crypto');
+require('dotenv').config();
+const express    = require('express');
+const crypto     = require('crypto');
+const { createClient } = require('@supabase/supabase-js');
 
 const app  = express();
 const PORT = process.env.PORT || 3000;
@@ -8,7 +10,13 @@ const PORT = process.env.PORT || 3000;
 app.use(express.urlencoded({ extended: true }));
 app.use(express.json());
 
-// ── Session store ────────────────────────────────────────────────────────────
+// ── Supabase client (server-side, anon key — same as test layer) ─────────────
+const supabase = createClient(
+  process.env.SUPABASE_URL  || '',
+  process.env.SUPABASE_ANON_KEY || '',
+);
+
+// ── Session store (UI auth only — no subscription state held here) ───────────
 const sessions = new Map();
 
 function getSid(req) {
@@ -17,7 +25,6 @@ function getSid(req) {
 }
 function getSession(req)          { const id = getSid(req); return id ? sessions.get(id) : null; }
 function setSession(res, data)    { const id = crypto.randomUUID(); sessions.set(id, data); res.setHeader('Set-Cookie', `sid=${id}; Path=/; HttpOnly`); }
-function patchSession(req, patch) { const id = getSid(req); if (id) sessions.set(id, { ...sessions.get(id), ...patch }); }
 
 // ── Payment simulation ───────────────────────────────────────────────────────
 const CARDS = {
@@ -27,6 +34,60 @@ const CARDS = {
   '4000000000009995': 'Your card has insufficient funds.',
 };
 function pay(raw) { return CARDS[raw.replace(/\s/g, '')] ?? null; }
+
+// ── DB helpers ────────────────────────────────────────────────────────────────
+async function dbGetSubscription(email) {
+  const { data: user } = await supabase
+    .from('users').select('id').eq('email', email).single();
+  if (!user) return null;
+  const { data: sub } = await supabase
+    .from('subscriptions').select('*')
+    .eq('user_id', user.id)
+    .order('created_at', { ascending: false })
+    .limit(1).single();
+  return sub || null;
+}
+
+async function dbCreateUser(email, password) {
+  const { data, error } = await supabase
+    .from('users').insert({ email, password }).select().single();
+  if (error) return { error: error.code === '23505' ? 'Email already registered.' : error.message };
+  return { user: data };
+}
+
+async function dbValidateUser(email) {
+  const { data } = await supabase
+    .from('users').select('id,email').eq('email', email).single();
+  return data || null;
+}
+
+async function dbCreateSubscription(email, plan, price) {
+  const user = await dbValidateUser(email);
+  if (!user) return null;
+  const { data } = await supabase
+    .from('subscriptions')
+    .insert({ user_id: user.id, plan, state: 'active' })
+    .select().single();
+  if (data) {
+    await supabase.from('payments').insert({ user_id: user.id, status: 'success', amount: parseFloat(price) });
+  }
+  return data || null;
+}
+
+async function dbCancelSubscription(email) {
+  const user = await dbValidateUser(email);
+  if (!user) return false;
+  const { data: sub } = await supabase
+    .from('subscriptions').select('id,state')
+    .eq('user_id', user.id)
+    .order('created_at', { ascending: false })
+    .limit(1).single();
+  if (!sub || (sub.state !== 'active' && sub.state !== 'trial' && sub.state !== 'past_due')) return false;
+  await supabase.from('subscriptions')
+    .update({ state: 'canceled', updated_at: new Date().toISOString() })
+    .eq('id', sub.id);
+  return true;
+}
 
 // ── Shared styles ────────────────────────────────────────────────────────────
 const CSS = `
@@ -137,7 +198,7 @@ app.get('/signup', (req, res) => {
 });
 
 // ── POST /signup ─────────────────────────────────────────────────────────────
-app.post('/signup', (req, res) => {
+app.post('/signup', async (req, res) => {
   const { email = '', password = '', confirmPassword = '' } = req.body;
   const redir = e => res.redirect('/signup?error=' + encodeURIComponent(e));
   if (!email.trim())                              return redir('Email is required');
@@ -145,7 +206,11 @@ app.post('/signup', (req, res) => {
   if (!password.trim())                           return redir('Password is required');
   if (password.length < 6)                        return redir('Password must be at least 6 characters');
   if (password !== confirmPassword)               return redir('Passwords do not match');
-  setSession(res, { email, subscription: null });
+
+  const { error } = await dbCreateUser(email, password);
+  if (error) return redir(error);
+
+  setSession(res, { email });
   res.redirect('/pricing');
 });
 
@@ -166,8 +231,11 @@ app.get('/login', (req, res) => {
   </div></div>`));
 });
 
-app.post('/login', (req, res) => {
-  setSession(res, { email: req.body.email, subscription: null });
+app.post('/login', async (req, res) => {
+  const { email = '' } = req.body;
+  const user = await dbValidateUser(email);
+  if (!user) return res.redirect('/login?error=' + encodeURIComponent('Invalid credentials'));
+  setSession(res, { email });
   res.redirect('/dashboard');
 });
 
@@ -227,7 +295,7 @@ app.get('/checkout', (req, res) => {
 });
 
 // ── POST /checkout ────────────────────────────────────────────────────────────
-app.post('/checkout', (req, res) => {
+app.post('/checkout', async (req, res) => {
   const s = getSession(req);
   if (!s) return res.redirect('/signup');
   const { cardNumber = '', plan, price } = req.body;
@@ -235,27 +303,29 @@ app.post('/checkout', (req, res) => {
   if (payErr) {
     return res.redirect('/checkout?plan=' + encodeURIComponent(plan) + '&error=' + encodeURIComponent(payErr));
   }
-  patchSession(req, { subscription: { plan, price, state: 'active' } });
+  await dbCreateSubscription(s.email, plan, price);
   res.redirect('/dashboard?activated=1');
 });
 
 // ── GET /dashboard ────────────────────────────────────────────────────────────
-app.get('/dashboard', (req, res) => {
+app.get('/dashboard', async (req, res) => {
   const s = getSession(req);
   if (!s) return res.redirect('/signup');
-  const sub      = s.subscription;
-  const state    = sub ? sub.state : 'inactive';
-  const label    = state === 'active'   ? 'Active'
-                 : state === 'canceled' ? 'Canceled'
-                 : state === 'trial'    ? 'Trial'
-                 : state === 'past_due' ? 'Past Due'
-                 : 'Inactive';
-  const activated = req.query.activated === '1';
-  const cancelled = req.query.cancelled === '1';
+
+  const sub   = await dbGetSubscription(s.email);
+  const state = sub ? sub.state : 'inactive';
+  const label = state === 'active'   ? 'Active'
+              : state === 'canceled' ? 'Canceled'
+              : state === 'trial'    ? 'Trial'
+              : state === 'past_due' ? 'Past Due'
+              : 'Inactive';
+
+  const activated  = req.query.activated === '1';
+  const cancelled  = req.query.cancelled === '1';
   const successMsg = activated ? 'Subscription activated!'
                    : cancelled ? 'Subscription canceled successfully.'
                    : '';
-  const canCancel = sub && (state === 'active' || state === 'past_due' || state === 'trial');
+  const canCancel  = sub && (state === 'active' || state === 'past_due' || state === 'trial');
 
   res.send(page('Dashboard – SubFlow', `
   ${nav(s)}
@@ -265,7 +335,7 @@ app.get('/dashboard', (req, res) => {
     <div class="stat">
       <div class="stat-label">Subscription Status</div>
       <div id="subscription-status" class="status-${state}">${label}</div>
-      ${sub ? `<div style="color:#64748b;font-size:.8rem;margin-top:.3rem;text-transform:capitalize">Plan: ${sub.plan} · $${sub.price}/mo</div>` : ''}
+      ${sub ? `<div style="color:#64748b;font-size:.8rem;margin-top:.3rem;text-transform:capitalize">Plan: ${sub.plan}</div>` : ''}
     </div>
     <div style="background:rgba(255,255,255,.04);border:1px solid rgba(255,255,255,.08);border-radius:12px;padding:1.2rem 1.5rem;margin-bottom:1.5rem">
       <div style="font-size:.8rem;color:#a5b4fc;text-transform:uppercase;letter-spacing:.05em;margin-bottom:.5rem">Account</div>
@@ -291,23 +361,20 @@ app.get('/dashboard', (req, res) => {
 });
 
 // ── POST /dashboard/cancel ───────────────────────────────────────────────────
-app.post('/dashboard/cancel', (req, res) => {
+app.post('/dashboard/cancel', async (req, res) => {
   const s = getSession(req);
   if (!s) return res.redirect('/signup');
-  if (s.subscription) {
-    patchSession(req, { subscription: { ...s.subscription, state: 'canceled' } });
-  }
+  await dbCancelSubscription(s.email);
   res.redirect('/dashboard?cancelled=1');
 });
 
 // ── POST /__test__/session ── test-only backdoor ────────────────────────────
-// Allows tests to establish an authenticated UI session without going through
-// the signup form. NEVER expose this in a real application.
+// Allows E2E tests to establish an authenticated UI session without going
+// through the signup form. NEVER expose this in a real application.
 app.post('/__test__/session', (req, res) => {
-  const { email = 'test@example.com', plan, price, state } = req.body || {};
-  const subscription = plan ? { plan, price: String(price || '0'), state: state || 'active' } : null;
-  setSession(res, { email, subscription });
-  res.json({ ok: true, email, subscription });
+  const { email = 'test@example.com' } = req.body || {};
+  setSession(res, { email });
+  res.json({ ok: true, email });
 });
 
 // ── Start ─────────────────────────────────────────────────────────────────────

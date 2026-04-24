@@ -65,9 +65,8 @@ test.describe('Negative Tests – Payment Failures @regression', () => {
     const userData = DataFactory.generateUserData();
     const user = await userService.createUser(userData.email, userData.password!);
 
-    // The mock API has a ~10% random failure rate; we test the service error path
-    // by checking that when createSubscription throws, no subscription exists.
-    // We override by testing a scenario where no subscription is present.
+    // Verify that a freshly created user has no subscription in Supabase.
+    // This validates the starting condition: no dangling subscriptions on new users.
     const status = await subscriptionService.getStatus(user.id);
     expect(status).toBeNull(); // no subscription yet
     Logger.info('[Test] Confirmed: no dangling subscription after failed payment.');

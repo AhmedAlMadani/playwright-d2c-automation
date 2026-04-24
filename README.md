@@ -68,18 +68,22 @@ User Journey
 └─────────────────────────────┘  ┌───────────▼────────────────────┐
                                  │       API LAYER                │
                                  │  src/api/                      │
-                                 │  - ApiClient (base + mock DB)  │
+                                 │  - ApiClient (Supabase queries)│
                                  │  - UserApiService              │
                                  │  - SubscriptionApiService      │
                                  └───────────┬────────────────────┘
                                              │
                                  ┌───────────▼────────────────────┐
-                                 │      UTILITIES & CONFIG        │
-                                 │  src/utils/  src/config/       │
-                                 │  - DataFactory (faker)         │
-                                 │  - PaymentMock                 │
-                                 │  - Logger                      │
-                                 │  - Environment config          │
+                                 │       DB LAYER                 │
+                                 │  src/db/                       │
+                                 │  - supabaseClient.ts (singleton│
+                                 │  - dbCleanup.ts (test isolation│
+                                 └───────────┬────────────────────┘
+                                             │
+                                 ┌───────────▼────────────────────┐
+                                 │       SUPABASE (PostgreSQL)    │
+                                 │  tables: users, subscriptions, │
+                                 │          payments              │
                                  └────────────────────────────────┘
 ```
 
@@ -88,10 +92,11 @@ User Journey
 | Layer | Responsibility |
 |-------|---------------|
 | **Tests** | Orchestration only — describe what should happen |
-| **Fixtures** | Dependency injection — wire everything together |
+| **Fixtures** | Dependency injection — wire everything, clean DB before each test |
 | **Pages (POM)** | UI interaction abstraction — Playwright selectors |
 | **Services** | Business logic — state machine, validation, error handling |
-| **API Layer** | HTTP/mock abstraction — data creation and retrieval |
+| **API Layer** | Supabase query abstraction — data creation and retrieval |
+| **DB Layer** | Singleton client + test isolation utilities |
 | **Utils** | Stateless helpers — data generation, mocking, logging |
 
 ---
@@ -105,11 +110,14 @@ playwright-d2c-automation/
 │       └── ci.yml               # Multi-job CI pipeline
 ├── src/
 │   ├── api/
-│   │   ├── apiClient.ts         # Base client + in-memory mock DB
+│   │   ├── apiClient.ts         # Base client — Supabase queries
 │   │   ├── subscriptionService.ts # Subscription API operations
 │   │   └── userService.ts       # User API operations
 │   ├── config/
 │   │   └── environment.ts       # Env var loading + defaults
+│   ├── db/
+│   │   ├── supabaseClient.ts    # Supabase singleton (API layer only)
+│   │   └── dbCleanup.ts         # Test isolation — cleans tables beforeEach
 │   ├── fixtures/
 │   │   └── index.ts             # Custom Playwright test fixtures
 │   ├── pages/
@@ -169,8 +177,71 @@ npx playwright install --with-deps
 
 # Copy and configure environment variables
 cp .env.example .env
-# Edit .env as needed
+# Edit .env and fill in SUPABASE_URL and SUPABASE_ANON_KEY
 ```
+
+---
+
+## 🗄️ Supabase Integration
+
+This framework uses [Supabase](https://supabase.com) (PostgreSQL) as the real backend database, replacing the original in-memory mock. The integration is contained entirely within the **API and DB layers** — tests, services, and page objects have zero awareness of Supabase.
+
+### Setup
+
+1. Create a free project at [supabase.com](https://supabase.com)
+2. Run the schema SQL (see below) in **SQL Editor → New query**
+3. Copy credentials from **Project Settings → API**
+4. Add them to `.env`:
+
+```bash
+SUPABASE_URL=https://<project-ref>.supabase.co
+SUPABASE_ANON_KEY=<your-anon-key>
+```
+
+### Database Schema
+
+```sql
+create table users (
+  id uuid primary key default gen_random_uuid(),
+  email text unique not null,
+  password text not null,
+  created_at timestamp default now()
+);
+
+create table subscriptions (
+  id uuid primary key default gen_random_uuid(),
+  user_id uuid references users(id) on delete cascade,
+  plan text not null,
+  state text check (state in ('inactive','trial','active','past_due','canceled')),
+  created_at timestamp default now(),
+  updated_at timestamp default now()
+);
+
+create table payments (
+  id uuid primary key default gen_random_uuid(),
+  user_id uuid references users(id),
+  status text check (status in ('success','failed')),
+  amount numeric,
+  created_at timestamp default now()
+);
+```
+
+### Anon Key vs Service Role Key
+
+| Key | Use |
+|-----|-----|
+| `anon` (publishable) | ✅ All test operations — safe to commit to CI secrets |
+| `service_role` | ❌ Never use in tests — bypasses all security |
+
+### Test Isolation Strategy
+
+Before every test, `beforeEach` calls `cleanDatabase()` which deletes all rows from `payments`, `subscriptions`, and `users` in FK-safe order. No shared state ever leaks between tests.
+
+### CI/CD Secrets
+
+Add both vars as **Repository Secrets**: `SUPABASE_URL` and `SUPABASE_ANON_KEY`.
+
+> Settings → Secrets and variables → Actions → New repository secret
 
 ---
 

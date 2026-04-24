@@ -65,6 +65,8 @@ jobs:
         env:
           BASE_URL: ${{ vars.BASE_URL || 'http://localhost:3000' }}
           API_URL: ${{ vars.API_URL || 'http://localhost:3001' }}
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_ANON_KEY: ${{ secrets.SUPABASE_ANON_KEY }}
           CI: true
 
       - name: Upload smoke test report
@@ -108,10 +110,12 @@ jobs:
         run: npx playwright install --with-deps ${{ matrix.browser }}
 
       - name: Run regression tests (${{ matrix.browser }})
-        run: npx playwright test --project=${{ matrix.browser }} --grep @regression
+        run: npx playwright test --project=${{ matrix.browser }} --grep @regression --workers=1
         env:
           BASE_URL: ${{ vars.BASE_URL || 'http://localhost:3000' }}
           API_URL: ${{ vars.API_URL || 'http://localhost:3001' }}
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_ANON_KEY: ${{ secrets.SUPABASE_ANON_KEY }}
           CI: true
 
       - name: Upload regression report (${{ matrix.browser }})
@@ -154,8 +158,10 @@ jobs:
         run: npx playwright install --with-deps chromium
 
       - name: Run API tests
-        run: npm run test:api
+        run: npx playwright test src/tests/api --project=chromium --workers=1
         env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_ANON_KEY: ${{ secrets.SUPABASE_ANON_KEY }}
           CI: true
 
       - name: Upload API test report

@@ -22,11 +22,10 @@ test.describe('Checkout Flow – Happy Path @smoke @regression', () => {
   test('should complete full checkout and activate subscription', async ({
     userService,
     subscriptionService,
-    landingPage,
-    signupPage,
     pricingPage,
     checkoutPage,
     dashboardPage,
+    page,
   }) => {
     // ── Step 1: Create user via API ──────────────────────────────────────────
     const userData = DataFactory.generateUserData('SecurePass1!');
@@ -35,33 +34,28 @@ test.describe('Checkout Flow – Happy Path @smoke @regression', () => {
     expect(user.id).toBeTruthy();
     expect(user.email).toBe(userData.email);
 
-    // ── Step 2: Land on product page ─────────────────────────────────────────
-    await landingPage.goto();
-    await landingPage.clickSignUp();
+    // ── Step 2: Authenticate in UI via backdoor (user already in Supabase) ───
+    // Attempting UI signup with the same email would fail with "Email already
+    // registered" since the server now persists to Supabase. We skip the form
+    // and inject a session cookie directly.
+    await page.request.post('/__test__/session', { data: { email: user.email } });
 
-    // ── Step 3: Sign up via UI ───────────────────────────────────────────────
-    await signupPage.signup({ ...userData, id: user.id, createdAt: user.createdAt });
-    await signupPage.expectSignupSuccess();
-
-    // ── Step 4: Select a plan ────────────────────────────────────────────────
+    // ── Step 3: Select a plan ────────────────────────────────────────────────
     await pricingPage.goto();
     await pricingPage.selectPlan('Premium');
     await pricingPage.expectPlanSelected('Premium');
 
-    // ── Step 5: Complete checkout with success card ──────────────────────────
+    // ── Step 4: Complete checkout with success card (writes to Supabase) ─────
     const card = PaymentMock.getSuccessCard();
     await checkoutPage.fillPaymentDetails(card.cardNumber, card.expiry, card.cvv);
     await checkoutPage.completePurchase();
     await checkoutPage.expectPurchaseSuccess();
 
-    // Since mock UI and mock API are isolated, simulate the backend webhook/state update
-    await subscriptionService.subscribe(user.id, 'premium', 29.99);
-
-    // ── Step 6: Verify subscription is active via UI ──────────────────────────
+    // ── Step 5: Verify subscription is active via UI (reads from Supabase) ───
     await dashboardPage.goto();
     await dashboardPage.expectSubscriptionStatus('active');
 
-    // ── Step 7: Cross-validate via API ────────────────────────────────────────
+    // ── Step 6: Cross-validate via API ────────────────────────────────────────
     Logger.info('[Test] Cross-checking subscription state via API...');
     const subscription = await subscriptionService.getStatus(user.id);
     expect(subscription).not.toBeNull();

@@ -8,15 +8,21 @@
     "test:smoke": "playwright test --grep @smoke",
     "test:regression": "playwright test --grep @regression",
     "test:e2e": "playwright test src/tests/e2e",
-    "test:api": "playwright test src/tests/api",
-    "test:negative": "playwright test src/tests/negative",
-    "test:edge": "playwright test src/tests/edge",
-    "test:headed": "playwright test --headed",
+    "test:api": "playwright test src/tests/api --project=chromium",
+    "test:negative": "playwright test src/tests/negative --project=chromium",
+    "test:edge": "playwright test src/tests/edge --project=chromium",
+    "test:headed": "playwright test --headed --workers=1",
     "test:report": "playwright show-report",
     "typecheck": "tsc --noEmit",
     "start:mock": "node mock-app/server.js"
   },
-  "keywords": ["playwright", "typescript", "automation", "d2c", "subscription"],
+  "keywords": [
+    "playwright",
+    "typescript",
+    "automation",
+    "d2c",
+    "subscription"
+  ],
   "author": "",
   "license": "ISC",
   "devDependencies": {
@@ -27,6 +33,7 @@
   },
   "dependencies": {
     "@faker-js/faker": "^8.4.0",
+    "@supabase/supabase-js": "^2.104.1",
     "dotenv": "^16.4.0",
     "express": "^4.19.0",
     "uuid": "^9.0.0"

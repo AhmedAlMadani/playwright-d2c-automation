@@ -34,15 +34,8 @@ test.describe('Subscription Lifecycle @smoke @regression', () => {
     expect(subscription.state).toBe('active');
     Logger.info(`[Test] Subscription active: ${subscription.id}`);
 
-    // Authenticate in UI
-    await page.request.post('/__test__/session', { 
-      data: { 
-        email: user.email,
-        plan: subscription.planId,
-        price: subscription.price,
-        state: subscription.state
-      } 
-    });
+    // Authenticate in UI (email only — subscription state is read from Supabase)
+    await page.request.post('/__test__/session', { data: { email: user.email } });
 
     // ── Action: Cancel via UI ─────────────────────────────────────────────────
     await dashboardPage.goto();
@@ -50,10 +43,7 @@ test.describe('Subscription Lifecycle @smoke @regression', () => {
     await dashboardPage.clickCancelSubscription();
     await dashboardPage.expectCancellationSuccess();
 
-    // Since mock UI and mock API are isolated, simulate the backend webhook/state update
-    await subscriptionService.cancel(user.id);
-
-    // ── Assertion: UI shows canceled ──────────────────────────────────────────
+    // ── Assertion: UI shows canceled (state read live from Supabase) ──────────
     await dashboardPage.expectSubscriptionStatus('canceled');
 
     // ── Cross-check: API must agree ───────────────────────────────────────────

@@ -8,7 +8,7 @@ import { UserService } from '../services/UserService';
 import { SubscriptionService } from '../services/SubscriptionService';
 import { DataFactory } from '../utils/dataFactory';
 import { Logger } from '../utils/logger';
-import { ApiClient } from '../api/apiClient';
+import { cleanDatabase } from '../db/dbCleanup';
 import { config } from '../config/environment';
 
 /**
@@ -78,12 +78,13 @@ export const test = base.extend<D2CFixtures>({
 });
 
 /**
- * Shared beforeEach hook: reset mock database before every test
- * so tests are completely isolated.
+ * Shared beforeEach hook: clean the Supabase database before every test
+ * so tests are completely isolated with no shared state.
  */
 test.beforeEach(async () => {
-  ApiClient.resetMockDb();
-  Logger.debug('[Fixtures] Mock database reset for clean test run.');
+  await cleanDatabase();
+  Logger.debug('[Fixtures] Database cleaned for test isolation.');
 });
 
 export { expect };
+
