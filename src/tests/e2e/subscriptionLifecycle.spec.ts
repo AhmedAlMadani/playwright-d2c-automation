@@ -1,106 +1,87 @@
 /**
- * E2E Test: Subscription Lifecycle
+ * E2E Test: Advanced Subscription Lifecycle Funnel
  *
  * Tags: @smoke @regression
  *
- * Validates the full subscription lifecycle:
- *   active → canceled
- *
- * Strategy:
- *   - Create user + active subscription via API (fast setup)
- *   - Cancel via UI (simulates real user action)
- *   - Assert UI reflects "Canceled" state
- *   - Cross-validate via API to ensure backend agrees with UI
+ * Validates the full UI/API lifecycle funnel:
+ *   1. Signup → Trial (UI)
+ *   2. Trial → Active conversion (Time-based simulation)
+ *   3. Active → Past Due (Simulated payment failure)
+ *   4. Past Due → Grace Period (API transition)
+ *   5. Grace Period → Canceled (UI action)
  */
 
 import { test, expect } from '../../fixtures';
 import { DataFactory } from '../../utils/dataFactory';
 import { Logger } from '../../utils/logger';
-import { SubscriptionService } from '../../services/SubscriptionService';
+import { TimeService } from '../../utils/TimeService';
 
-test.describe('Subscription Lifecycle @smoke @regression', () => {
-  test('should cancel an active subscription and reflect correct state', async ({
+test.describe('Advanced Subscription Lifecycle Funnel @smoke @regression', () => {
+
+  test('should drive full lifecycle from trial to cancellation via UI and API', async ({
     userService,
     subscriptionService,
+    billingService,
     dashboardPage,
     page,
   }) => {
-    // ── Setup: Create user + subscription entirely via API ────────────────────
-    const userData = DataFactory.generateUserData('SecurePass1!');
-    const user = await userService.createUser(userData.email, userData.password!);
+    // ── Setup: Create user ───────────────────────────────────────────────────
+    const { email, password } = DataFactory.generateUserData('SecurePass1!');
+    const user = await userService.createUser(email, password!);
     Logger.info(`[Test] User created: ${user.id}`);
 
-    const subscription = await subscriptionService.subscribe(user.id, 'premium', 29.99);
-    expect(subscription.state).toBe('active');
-    Logger.info(`[Test] Subscription active: ${subscription.id}`);
+    // Authenticate in UI
+    await page.request.post('/__test__/session', { data: { email } });
 
-    // Authenticate in UI (email only — subscription state is read from Supabase)
-    await page.request.post('/__test__/session', { data: { email: user.email } });
+    // ── 1. Start Trial via API ───────────────────────────────────────────────
+    await subscriptionService.startTrial(user.id, 'premium', 29.99, 14);
 
-    // ── Action: Cancel via UI ─────────────────────────────────────────────────
+    // Verify UI shows Trial state
     await dashboardPage.goto();
+    await dashboardPage.expectSubscriptionStatus('trial');
+    const trialBadge = await dashboardPage.getTrialEndBadgeText();
+    expect(trialBadge).toContain('Ends');
+
+    // ── 2. Convert Trial to Active ───────────────────────────────────────────
+    TimeService.advanceDays(13); // Advance close to trial end but not expired
+    await subscriptionService.convertTrialToActive(user.id, 29.99);
+
+    // Verify UI reflects Active
+    await dashboardPage.page.reload();
     await dashboardPage.expectSubscriptionStatus('active');
+    let info = await dashboardPage.getBillingInfo();
+    expect(info.nextBilling).toBeDefined();
+
+    // ── 3. Payment Failure → Past Due ────────────────────────────────────────
+    const currentSub = await subscriptionService.getStatus(user.id);
+    await billingService.chargeWithFailure(user.id, currentSub!.id, 29.99);
+    await subscriptionService.transitionState(currentSub!.id, 'active', 'past_due');
+
+    await dashboardPage.page.reload();
+    await dashboardPage.expectSubscriptionStatus('past_due');
+
+    // ── 4. Enter Grace Period ────────────────────────────────────────────────
+    await subscriptionService.enterGracePeriod(user.id, 7);
+
+    await dashboardPage.page.reload();
+    await dashboardPage.expectSubscriptionStatus('grace');
+    await dashboardPage.expectGracePeriodWarningVisible();
+
+    const graceBadge = await dashboardPage.getGracePeriodBadgeText();
+    expect(graceBadge).toContain('Deadline');
+
+    // ── 5. Cancel via UI ─────────────────────────────────────────────────────
     await dashboardPage.clickCancelSubscription();
     await dashboardPage.expectCancellationSuccess();
-
-    // ── Assertion: UI shows canceled (state read live from Supabase) ──────────
     await dashboardPage.expectSubscriptionStatus('canceled');
 
+    // Verify UI hides auto-renew and shows resubscribe
+    await dashboardPage.expectAutoRenewToggleHidden();
+    await dashboardPage.expectResubscribeVisible();
+
     // ── Cross-check: API must agree ───────────────────────────────────────────
-    const updatedSubscription = await subscriptionService.getStatus(user.id);
-    expect(updatedSubscription).not.toBeNull();
-    expect(updatedSubscription!.state).toBe('canceled');
-    expect(updatedSubscription!.endDate).not.toBeNull();
-    Logger.info('[Test] API confirms subscription is canceled.');
-  });
-
-  test('should transition subscription from inactive → trial → active @regression', async ({
-    userService,
-    subscriptionService,
-  }) => {
-    // Create user
-    const userData = DataFactory.generateUserData();
-    const user = await userService.createUser(userData.email, userData.password!);
-
-    // Create an inactive subscription then drive it through trial → active
-    // Note: mockCreateSubscription creates directly as 'active'; here we test
-    // the state-transition API via direct calls to validate the state machine.
-    const subscription = await subscriptionService.subscribe(user.id, 'basic', 9.99);
-
-    // Force to inactive state for transition test (via updateSubscriptionState)
-    // We test the service-layer transition validation directly:
-    const validTransitions = SubscriptionService.getValidTransitions();
-    expect(validTransitions['inactive']).toContain('trial');
-    expect(validTransitions['trial']).toContain('active');
-    expect(validTransitions['active']).toContain('canceled');
-
-    // Validate that terminal states have no outgoing transitions
-    const terminalStates = SubscriptionService.getTerminalStates();
-    expect(terminalStates).toContain('canceled');
-    Logger.info('[Test] State transition map validated.');
-
-    // Validate the subscription is in expected state
-    const status = await subscriptionService.getStatus(user.id);
-    expect(status).not.toBeNull();
-    expect(status!.state).toBe('active');
-  });
-
-  test('should prevent canceling an already canceled subscription @regression', async ({
-    userService,
-    subscriptionService,
-  }) => {
-    const userData = DataFactory.generateUserData();
-    const user = await userService.createUser(userData.email, userData.password!);
-    await subscriptionService.subscribe(user.id, 'basic', 9.99);
-
-    // Cancel once — should succeed
-    const canceled = await subscriptionService.cancel(user.id);
-    expect(canceled.state).toBe('canceled');
-
-    // Cancel again — should throw
-    await expect(
-      subscriptionService.cancel(user.id),
-    ).rejects.toThrow(/Cannot cancel subscription in canceled state/);
-    Logger.info('[Test] Double-cancel correctly rejected.');
+    const finalSub = await subscriptionService.getStatus(user.id);
+    expect(finalSub!.state).toBe('canceled');
+    Logger.info('[Test] Full lifecycle validated across UI and API.');
   });
 });

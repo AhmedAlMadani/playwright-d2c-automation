@@ -1,6 +1,6 @@
-# 🧪 D2C Playwright Automation Framework
+# 🧪 Advanced SaaS Automation Framework
 
-A **production-quality** QA automation framework built with [Playwright](https://playwright.dev/) and TypeScript, simulating a real-world **Direct-to-Consumer (D2C) SaaS subscription funnel**.
+A **production-quality** QA automation framework built with [Playwright](https://playwright.dev/) and TypeScript, simulating a complex **SaaS billing and subscription lifecycle engine**.
 
 [![CI](https://github.com/your-org/playwright-d2c-automation/actions/workflows/ci.yml/badge.svg)](https://github.com/your-org/playwright-d2c-automation/actions/workflows/ci.yml)
 
@@ -12,30 +12,24 @@ A **production-quality** QA automation framework built with [Playwright](https:/
 - [Architecture](#-architecture)
 - [Project Structure](#-project-structure)
 - [Getting Started](#-getting-started)
+- [Supabase Integration](#-supabase-integration)
 - [Running Tests](#-running-tests)
 - [Test Coverage](#-test-coverage)
 - [State Machine](#-subscription-state-machine)
 - [Design Decisions](#-design-decisions)
-- [CI/CD](#-cicd)
-- [Example Test Flow](#-example-test-flow)
 
 ---
 
 ## 🎯 Project Overview
 
-This framework validates a complete SaaS subscription funnel:
+This framework goes far beyond basic UI testing. It provides a deterministic simulation of complex SaaS billing logic backed by a real PostgreSQL database (Supabase).
 
-```
-User Journey
-─────────────────────────────────────────────────────────────
-1. User lands on product page
-2. User signs up (via UI or API)
-3. User selects a subscription plan
-4. User completes checkout (mocked payment)
-5. Subscription becomes active
-6. User cancels subscription
-7. Subscription state updates correctly (UI + API cross-validated)
-```
+**Advanced Capabilities Validated:**
+- **7-State Lifecycle:** `inactive` → `trial` → `active` → `past_due` → `grace` → `expired` / `canceled`
+- **Time Simulation:** Deterministic "time travel" to test mid-cycle upgrades, trial expiry, and auto-renewals via a custom `TimeService`.
+- **Billing Proration:** Math-perfect validation of mid-cycle upgrade charges based on remaining days.
+- **Idempotency:** Payment retry scenarios ensuring exact idempotency keys are used.
+- **Cross-Layer Validation:** Every test asserts the UI state matches the API response, which matches the raw DB state.
 
 **Key design philosophy:** Tests contain **no business logic** — only orchestration. All logic lives in the service and API layers, making tests readable by non-engineers and maintainable at scale.
 
@@ -212,16 +206,25 @@ create table subscriptions (
   id uuid primary key default gen_random_uuid(),
   user_id uuid references users(id) on delete cascade,
   plan text not null,
-  state text check (state in ('inactive','trial','active','past_due','canceled')),
+  state text check (state in ('inactive','trial','active','past_due','grace','expired','canceled')),
+  price decimal not null,
+  currency text not null default 'USD',
+  billing_cycle_start timestamp default now(),
+  renews_at timestamp default now() + interval '30 days',
+  trial_ends_at timestamp,
+  grace_period_ends_at timestamp,
+  auto_renew boolean not null default true,
   created_at timestamp default now(),
   updated_at timestamp default now()
 );
 
 create table payments (
   id uuid primary key default gen_random_uuid(),
+  subscription_id uuid references subscriptions(id),
   user_id uuid references users(id),
   status text check (status in ('success','failed')),
   amount numeric,
+  idempotency_key text unique,
   created_at timestamp default now()
 );
 ```

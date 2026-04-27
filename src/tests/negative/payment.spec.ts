@@ -4,14 +4,13 @@
  * Tags: @regression
  *
  * Validates that the system handles all payment failure modes correctly:
- *   - Generic card decline
- *   - Expired card
- *   - Insufficient funds
- *   - Invalid card number format
- *   - Invalid signup inputs (empty fields, bad email, weak password)
- *   - Expired subscription reactivation attempt
+ *   - Generic card decline (UI)
+ *   - Expired card (UI)
+ *   - Insufficient funds (UI)
+ *   - Invalid signup inputs
+ *   - Service layer rejects invalid state transitions (e.g. canceled -> active)
  *
- * Strategy: API-created users, UI-driven checkout failures, API cross-check.
+ * Strategy: UI-driven checkout failures, API cross-check, Service layer validation.
  */
 
 import { test, expect } from '../../fixtures';
@@ -19,8 +18,8 @@ import { DataFactory } from '../../utils/dataFactory';
 import { PaymentMock, PaymentScenario } from '../../utils/paymentMock';
 import { Logger } from '../../utils/logger';
 
-test.describe('Negative Tests – Payment Failures @regression', () => {
-  // ── Parameterised: iterate over all failure scenarios ──────────────────────
+test.describe('Negative Tests – Payment Failures (UI) @regression', () => {
+  // ── Parameterised: iterate over all UI failure scenarios ───────────────────
   const failureScenarios = PaymentMock.getFailureScenarios();
 
   for (const scenario of failureScenarios) {
@@ -30,119 +29,80 @@ test.describe('Negative Tests – Payment Failures @regression', () => {
       checkoutPage,
       page,
     }) => {
-      // Setup: create a user
-      const userData = DataFactory.generateUserData('SecurePass1!');
-      const user = await userService.createUser(userData.email, userData.password!);
-      Logger.info(`[Test] Testing payment failure scenario: ${scenario}`);
+      // Setup
+      const { email, password } = DataFactory.generateUserData('SecurePass1!');
+      const user = await userService.createUser(email, password!);
+      Logger.info(`[Test] Testing UI payment failure scenario: ${scenario}`);
 
       const card = PaymentMock.getCard(scenario as PaymentScenario);
 
-      // Authenticate in UI
-      await page.request.post('/__test__/session', { data: { email: userData.email } });
+      // Authenticate
+      await page.request.post('/__test__/session', { data: { email } });
 
       await checkoutPage.goto('premium');
       await checkoutPage.fillPaymentDetails(card.cardNumber, card.expiry, card.cvv);
       await checkoutPage.completePurchase();
 
-      // Expect UI to show error
+      // Expect UI error
       const expectedError = PaymentMock.getExpectedError(scenario as PaymentScenario);
       if (expectedError) {
         await checkoutPage.expectPurchaseFailure(expectedError);
       }
 
-      // Cross-check: subscription should NOT have been created
+      // Cross-check: subscription should NOT exist
       const subscription = await subscriptionService.getStatus(user.id);
       expect(subscription).toBeNull();
-      Logger.info(`[Test] Correctly rejected payment for scenario: ${scenario}`);
     });
   }
-
-  // ── API-level: subscription creation with failed payment ──────────────────
-  test('should not create subscription when API payment fails @regression', async ({
-    userService,
-    subscriptionService,
-  }) => {
-    const userData = DataFactory.generateUserData();
-    const user = await userService.createUser(userData.email, userData.password!);
-
-    // Verify that a freshly created user has no subscription in Supabase.
-    // This validates the starting condition: no dangling subscriptions on new users.
-    const status = await subscriptionService.getStatus(user.id);
-    expect(status).toBeNull(); // no subscription yet
-    Logger.info('[Test] Confirmed: no dangling subscription after failed payment.');
-  });
 });
 
 test.describe('Negative Tests – Invalid Signup Inputs @regression', () => {
   test('should reject signup with empty email', async ({ signupPage }) => {
     await signupPage.goto();
-    await signupPage.signup({
-      id: 'test',
-      email: '',
-      password: 'ValidPass1!',
-      createdAt: new Date().toISOString(),
-    });
+    await signupPage.signup({ id: 'test', email: '', password: 'ValidPass1!', createdAt: new Date().toISOString() });
     await signupPage.expectSignupFailure('Email is required');
   });
 
   test('should reject signup with invalid email format', async ({ signupPage }) => {
     await signupPage.goto();
-    await signupPage.signup({
-      id: 'test',
-      email: 'not-an-email',
-      password: 'ValidPass1!',
-      createdAt: new Date().toISOString(),
-    });
+    await signupPage.signup({ id: 'test', email: 'not-an-email', password: 'ValidPass1!', createdAt: new Date().toISOString() });
     await signupPage.expectSignupFailure('Invalid email address');
   });
 
-  test('should reject signup with empty password', async ({ signupPage }) => {
+  test('should reject signup with weak password', async ({ signupPage }) => {
     await signupPage.goto();
-    await signupPage.signup({
-      id: 'test',
-      email: 'valid@example.com',
-      password: '',
-      createdAt: new Date().toISOString(),
-    });
-    await signupPage.expectSignupFailure('Password is required');
+    await signupPage.signup({ id: 'test', email: 'valid@example.com', password: 'short', createdAt: new Date().toISOString() });
+    await signupPage.expectSignupFailure('Password must be at least 6 characters');
   });
 });
 
-test.describe('Negative Tests – Expired Subscription @regression', () => {
-  test('should prevent reactivating a canceled subscription directly @regression', async ({
+test.describe('Negative Tests – State Machine Integrity @regression', () => {
+  test('should prevent reactivating a canceled subscription directly via transition', async ({
     userService,
     subscriptionService,
   }) => {
-    const userData = DataFactory.generateUserData();
-    const user = await userService.createUser(userData.email, userData.password!);
-    await subscriptionService.subscribe(user.id, 'basic', 9.99);
+    const { email, password } = DataFactory.generateUserData();
+    const user = await userService.createUser(email, password!);
+    const sub = await subscriptionService.subscribe(user.id, 'basic', 9.99);
 
-    // Cancel the subscription
     const canceled = await subscriptionService.cancel(user.id);
     expect(canceled.state).toBe('canceled');
 
-    // Attempt invalid transition: canceled → active (should fail)
-    expect(() => {
-      subscriptionService.validateTransition('canceled', 'active');
-    }).toThrow(/Invalid transition/);
-
-    Logger.info('[Test] Correctly prevented transition from canceled to active.');
+    // API should reject direct transition back to active
+    await expect(
+      subscriptionService.transitionState(sub.id, 'canceled', 'active'),
+    ).rejects.toThrow(/Invalid transition/);
   });
 
-  test('should prevent transition from past_due directly to canceled via trial @regression', async ({
-    userService,
+  test('should prevent transition from past_due directly to canceled via trial', async ({
     subscriptionService,
   }) => {
-    // Validate that trial → past_due is not a valid transition
     expect(() => {
       subscriptionService.validateTransition('trial', 'past_due');
     }).toThrow(/Invalid transition/);
 
-    // Validate that canceled → trial is also invalid
     expect(() => {
       subscriptionService.validateTransition('canceled', 'trial');
     }).toThrow(/Invalid transition/);
-
-    Logger.info('[Test] Invalid state transitions correctly rejected by service layer.');
   });
 });

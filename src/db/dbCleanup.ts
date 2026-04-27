@@ -4,14 +4,14 @@ import { Logger } from '../utils/logger';
 /**
  * cleanDatabase — Truncates all test-owned tables in FK-safe order.
  *
- * Call this from the beforeEach fixture hook to guarantee a clean slate
- * for every test. Order matters: payments and subscriptions reference
+ * Call this from the global setup hook (`global.setup.ts`) to guarantee a clean slate
+ * for the entire test run. Order matters: payments and subscriptions reference
  * users, so they must be cleared first.
  *
  * IMPORTANT: This function uses the Supabase client directly because it is
  * a database-infrastructure concern, not a business-logic concern.
  * It lives in the `db/` layer and must NOT be called from tests directly —
- * only from the fixture setup hook.
+ * only from the global setup hook.
  */
 export async function cleanDatabase(): Promise<void> {
   Logger.debug('[DB] Cleaning database for test isolation...');

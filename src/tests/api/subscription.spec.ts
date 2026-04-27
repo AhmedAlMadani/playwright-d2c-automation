@@ -96,6 +96,24 @@ test.describe('API Tests – Subscription Service @regression', () => {
     Logger.info('[Test] Subscription for non-existent user correctly rejected.');
   });
 
+  test('subscribe: should reject if user already has an active subscription', async ({
+    userService,
+    subscriptionService,
+  }) => {
+    const userData = DataFactory.generateUserData();
+    const user = await userService.createUser(userData.email, userData.password!);
+    
+    // First subscription succeeds
+    await subscriptionService.subscribe(user.id, 'basic', 9.99, 'USD');
+
+    // Second subscription should be rejected
+    await expect(
+      subscriptionService.subscribe(user.id, 'premium', 29.99, 'USD')
+    ).rejects.toThrow(/User already has an active subscription/);
+    
+    Logger.info('[Test] Duplicate active subscription correctly rejected.');
+  });
+
   test('getStatus: should return null when no subscription exists', async ({
     userService,
     subscriptionService,
@@ -128,7 +146,10 @@ test.describe('API Tests – Subscription Service @regression', () => {
       inactive: ['trial', 'active'],
       trial: ['active', 'canceled'],
       active: ['past_due', 'canceled'],
-      past_due: ['active', 'canceled'],
+      past_due: ['grace', 'canceled'],
+      grace: ['active', 'canceled'],
+      expired: [],
+      canceled: [],
     } as const;
 
     for (const [from, targets] of Object.entries(validTransitions)) {

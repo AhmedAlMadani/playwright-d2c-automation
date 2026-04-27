@@ -6,14 +6,17 @@ import { CheckoutPage } from '../pages/checkoutPage';
 import { DashboardPage } from '../pages/dashboardPage';
 import { UserService } from '../services/UserService';
 import { SubscriptionService } from '../services/SubscriptionService';
+import { BillingService } from '../services/BillingService';
 import { DataFactory } from '../utils/dataFactory';
 import { Logger } from '../utils/logger';
-import { cleanDatabase } from '../db/dbCleanup';
+import { TimeService } from '../utils/TimeService';
+import { BillingCalculator } from '../utils/BillingCalculator';
+import { ConsistencyValidator } from '../utils/ConsistencyValidator';
 import { config } from '../config/environment';
 
 /**
  * Custom fixture interface extending Playwright's base test fixtures.
- * Every test gets pre-wired page objects and services for free.
+ * Every test gets pre-wired page objects, services, and utilities.
  */
 export interface D2CFixtures {
   // Page Objects
@@ -26,10 +29,14 @@ export interface D2CFixtures {
   // Business Services
   userService: UserService;
   subscriptionService: SubscriptionService;
+  billingService: BillingService;
 
   // Utilities
   dataFactory: typeof DataFactory;
   logger: typeof Logger;
+  timeService: typeof TimeService;
+  billingCalculator: typeof BillingCalculator;
+  consistencyValidator: typeof ConsistencyValidator;
 }
 
 /**
@@ -67,24 +74,42 @@ export const test = base.extend<D2CFixtures>({
     await use(new SubscriptionService(request, config.apiUrl));
   },
 
-  // ─── Utilities ───────────────────────────────────────────────────────────────
-  dataFactory: async ({}, use) => {
+  billingService: async ({ request }, use) => {
+    await use(new BillingService(request, config.apiUrl));
+  },
+
+  // ─── Utilities (injected as class references — static methods only) ─────────
+  dataFactory: async ({ }, use) => {
     await use(DataFactory);
   },
 
-  logger: async ({}, use) => {
+  logger: async ({ }, use) => {
     await use(Logger);
+  },
+
+  timeService: async ({ }, use) => {
+    await use(TimeService);
+  },
+
+  billingCalculator: async ({ }, use) => {
+    await use(BillingCalculator);
+  },
+
+  consistencyValidator: async ({ }, use) => {
+    await use(ConsistencyValidator);
   },
 });
 
 /**
- * Shared beforeEach hook: clean the Supabase database before every test
- * so tests are completely isolated with no shared state.
+ * Shared beforeEach hook: reset virtual clock before every test.
+ *
+ * TimeService.reset() ensures a frozen/advanced clock from one test never
+ * bleeds into the next — critical for time-based transition tests.
+ * Note: Database is cleaned ONCE in global.setup.ts, not here.
  */
 test.beforeEach(async () => {
-  await cleanDatabase();
-  Logger.debug('[Fixtures] Database cleaned for test isolation.');
+  TimeService.reset();
+  Logger.debug('[Fixtures] Clock reset for test isolation.');
 });
 
 export { expect };
-

@@ -72,14 +72,74 @@ async function dbValidateUser(email) {
 async function dbCreateSubscription(email, plan, price) {
   const user = await dbValidateUser(email);
   if (!user) return null;
-  const { data } = await supabase
+  const now = new Date().toISOString();
+  const renewsAt = new Date(Date.now() + 30 * 86400000).toISOString();
+
+  // Check for existing active subscription
+  const { data: existing } = await supabase
     .from('subscriptions')
-    .insert({ user_id: user.id, plan, state: 'active' })
-    .select().single();
+    .select('id')
+    .eq('user_id', user.id)
+    .in('state', ['active', 'trial', 'past_due', 'grace'])
+    .limit(1).single();
+
+  let data;
+  if (existing) {
+    // UPDATE existing subscription
+    const { data: updatedSub } = await supabase
+      .from('subscriptions')
+      .update({
+        plan,
+        state: 'active',
+        amount: parseFloat(price),
+        billing_cycle_start: now,
+        renews_at: renewsAt,
+        updated_at: now
+      })
+      .eq('id', existing.id)
+      .select().single();
+    data = updatedSub;
+  } else {
+    // INSERT new subscription
+    const { data: newSub } = await supabase
+      .from('subscriptions')
+      .insert({
+        user_id: user.id,
+        plan,
+        state: 'active',
+        amount: parseFloat(price),
+        currency: 'USD',
+        auto_renew: true,
+        billing_cycle_start: now,
+        renews_at: renewsAt,
+      })
+      .select().single();
+    data = newSub;
+  }
+
   if (data) {
-    await supabase.from('payments').insert({ user_id: user.id, status: 'success', amount: parseFloat(price) });
+    await supabase.from('payments').insert({
+      user_id: user.id,
+      subscription_id: data.id,
+      status: 'success',
+      amount: parseFloat(price),
+    });
   }
   return data || null;
+}
+
+async function dbToggleAutoRenew(email) {
+  const user = await dbValidateUser(email);
+  if (!user) return null;
+  const { data: sub } = await supabase
+    .from('subscriptions').select('id,auto_renew')
+    .eq('user_id', user.id)
+    .order('created_at', { ascending: false })
+    .limit(1).single();
+  if (!sub) return null;
+  const newVal = !sub.auto_renew;
+  await supabase.from('subscriptions').update({ auto_renew: newVal }).eq('id', sub.id);
+  return newVal;
 }
 
 async function dbCancelSubscription(email) {
@@ -90,7 +150,7 @@ async function dbCancelSubscription(email) {
     .eq('user_id', user.id)
     .order('created_at', { ascending: false })
     .limit(1).single();
-  if (!sub || (sub.state !== 'active' && sub.state !== 'trial' && sub.state !== 'past_due')) return false;
+  if (!sub || !['active', 'trial', 'past_due', 'grace'].includes(sub.state)) return false;
   await supabase.from('subscriptions')
     .update({ state: 'canceled', updated_at: new Date().toISOString() })
     .eq('id', sub.id);
@@ -138,7 +198,23 @@ input:focus{border-color:#7c3aed}
 .status-canceled{color:#f87171}
 .status-trial{color:#60a5fa}
 .status-past_due{color:#fbbf24}
+.status-grace{color:#fb923c}
+.status-expired{color:#a78bfa}
 .status-inactive{color:#94a3b8}
+.info-row{display:flex;justify-content:space-between;font-size:.82rem;color:#64748b;margin-top:.25rem}
+.info-row span{color:#94a3b8}
+.badge{display:inline-block;padding:.15rem .55rem;border-radius:999px;font-size:.72rem;font-weight:600;margin-left:.5rem}
+.badge-trial{background:rgba(96,165,250,.15);color:#60a5fa;border:1px solid rgba(96,165,250,.3)}
+.badge-grace{background:rgba(251,146,60,.15);color:#fb923c;border:1px solid rgba(251,146,60,.3)}
+.toggle-row{display:flex;align-items:center;justify-content:space-between;background:rgba(255,255,255,.04);border:1px solid rgba(255,255,255,.08);border-radius:12px;padding:1rem 1.5rem;margin-bottom:1.2rem}
+.toggle-label{font-size:.85rem;color:#a5b4fc;font-weight:500}
+.toggle-sub{font-size:.78rem;color:#64748b;margin-top:.1rem}
+.toggle-switch{position:relative;width:42px;height:24px;cursor:pointer}
+.toggle-switch input{opacity:0;width:0;height:0}
+.slider{position:absolute;inset:0;background:#334155;border-radius:999px;transition:.2s}
+.slider::before{content:'';position:absolute;width:18px;height:18px;left:3px;top:3px;background:#fff;border-radius:50%;transition:.2s}
+input:checked+.slider{background:#7c3aed}
+input:checked+.slider::before{transform:translateX(18px)}
 .modal{display:none;position:fixed;inset:0;background:rgba(0,0,0,.6);align-items:center;justify-content:center;z-index:100}
 .modal.open{display:flex}
 .modal-box{background:#1e1e2e;border:1px solid rgba(255,255,255,.15);border-radius:16px;padding:2rem;max-width:380px;width:90%;text-align:center}
@@ -322,38 +398,76 @@ app.get('/dashboard', async (req, res) => {
 
   const sub   = await dbGetSubscription(s.email);
   const state = sub ? sub.state : 'inactive';
-  const label = state === 'active'   ? 'Active'
-              : state === 'canceled' ? 'Canceled'
-              : state === 'trial'    ? 'Trial'
-              : state === 'past_due' ? 'Past Due'
-              : 'Inactive';
+  const LABELS = {
+    active: 'Active', canceled: 'Canceled', trial: 'Trial',
+    past_due: 'Past Due', grace: 'Grace Period', expired: 'Expired', inactive: 'Inactive',
+  };
+  const label = LABELS[state] || state;
 
   const activated  = req.query.activated === '1';
   const cancelled  = req.query.cancelled === '1';
+  const toggled    = req.query.toggled   === '1';
   const successMsg = activated ? 'Subscription activated!'
                    : cancelled ? 'Subscription canceled successfully.'
+                   : toggled  ? 'Auto-renew setting updated.'
                    : '';
-  const canCancel  = sub && (state === 'active' || state === 'past_due' || state === 'trial');
+  const canCancel  = sub && ['active','past_due','trial','grace'].includes(state);
+
+  // Date helpers
+  const fmt = iso => iso ? new Date(iso).toLocaleDateString('en-US',{month:'short',day:'numeric',year:'numeric'}) : '—';
+  const trialBadge = state === 'trial' && sub.trial_ends_at
+    ? `<span class="badge badge-trial">Ends ${fmt(sub.trial_ends_at)}</span>` : '';
+  const graceBadge = state === 'grace' && sub.grace_period_ends_at
+    ? `<span class="badge badge-grace">Deadline ${fmt(sub.grace_period_ends_at)}</span>` : '';
+
+  const autoRenew = sub ? (sub.auto_renew !== false) : true;
+  const renewInfo = sub && sub.renews_at
+    ? `<div class="info-row"><span>${autoRenew ? 'Next billing' : 'Access until'}</span><span>${fmt(sub.renews_at)}</span></div>` : '';
+  const cycleInfo = sub && sub.billing_cycle_start
+    ? `<div class="info-row"><span>Cycle started</span><span>${fmt(sub.billing_cycle_start)}</span></div>` : '';
+  const graceInfo = state === 'grace' && sub.grace_period_ends_at
+    ? `<div class="info-row" style="color:#fb923c"><span>⚠️ Payment due by</span><span>${fmt(sub.grace_period_ends_at)}</span></div>` : '';
 
   res.send(page('Dashboard – SubFlow', `
   ${nav(s)}
   <div class="wrap">
     <h1 style="margin-bottom:1.5rem">Your Dashboard</h1>
-    ${successMsg ? `<div class="success-message">${successMsg}</div>` : ''}
+    ${successMsg ? `<div class="success-message" data-testid="success-msg">${successMsg}</div>` : ''}
+
     <div class="stat">
       <div class="stat-label">Subscription Status</div>
-      <div id="subscription-status" class="status-${state}">${label}</div>
-      ${sub ? `<div style="color:#64748b;font-size:.8rem;margin-top:.3rem;text-transform:capitalize">Plan: ${sub.plan}</div>` : ''}
+      <div id="subscription-status" data-testid="subscription-status" class="status-${state}">${label}${trialBadge}${graceBadge}</div>
+      ${sub ? `<div style="color:#64748b;font-size:.8rem;margin-top:.3rem;text-transform:capitalize">Plan: <strong style="color:#a5b4fc">${sub.plan}</strong>${sub.amount ? ` — $${parseFloat(sub.amount).toFixed(2)}/mo` : ''}</div>` : ''}
+      ${renewInfo}${cycleInfo}${graceInfo}
     </div>
-    <div style="background:rgba(255,255,255,.04);border:1px solid rgba(255,255,255,.08);border-radius:12px;padding:1.2rem 1.5rem;margin-bottom:1.5rem">
+
+    <div style="background:rgba(255,255,255,.04);border:1px solid rgba(255,255,255,.08);border-radius:12px;padding:1.2rem 1.5rem;margin-bottom:1.2rem">
       <div style="font-size:.8rem;color:#a5b4fc;text-transform:uppercase;letter-spacing:.05em;margin-bottom:.5rem">Account</div>
       <div style="color:#94a3b8;font-size:.9rem">${s.email}</div>
     </div>
+
+    ${sub && ['active','trial','past_due','grace'].includes(state) ? `
+    <form method="POST" action="/dashboard/toggle-autorenew" style="margin-bottom:1.2rem">
+      <div class="toggle-row">
+        <div>
+          <div class="toggle-label">Auto-Renew</div>
+          <div class="toggle-sub">${autoRenew ? 'Subscription renews automatically' : 'Expires at end of billing period'}</div>
+        </div>
+        <label class="toggle-switch" title="Toggle auto-renew">
+          <input type="checkbox" id="autorenew-toggle" name="autorenew" ${autoRenew ? 'checked' : ''} onchange="this.form.submit()">
+          <span class="slider"></span>
+        </label>
+      </div>
+    </form>` : ''}
+
+    ${sub && ['active','trial'].includes(state) ? `
+    <a href="/pricing" class="btn btn-outline" style="margin-bottom:1rem;text-align:center;display:block">Change Plan</a>` : ''}
+
     ${canCancel ? `<button class="btn btn-outline" onclick="document.getElementById('cancel-modal').classList.add('open')" style="color:#f87171;border-color:rgba(248,113,113,.4)">Cancel Subscription</button>` : ''}
     ${!sub ? `<a href="/pricing" class="btn">Choose a Plan</a>` : ''}
+    ${state === 'canceled' || state === 'expired' ? `<a href="/pricing" class="btn" style="margin-top:1rem">Resubscribe</a>` : ''}
   </div>
 
-  <!-- Cancellation confirmation modal -->
   <div id="cancel-modal" class="modal">
     <div class="modal-box">
       <h2>Cancel Subscription?</h2>
@@ -361,7 +475,7 @@ app.get('/dashboard', async (req, res) => {
       <div class="modal-actions">
         <button class="btn btn-outline" onclick="document.getElementById('cancel-modal').classList.remove('open')">Keep Plan</button>
         <form method="POST" action="/dashboard/cancel" style="flex:1">
-          <button class="btn" type="submit" style="background:linear-gradient(135deg,#dc2626,#b91c1c)">Confirm Cancellation</button>
+          <button class="btn" type="submit" id="confirm-cancel-btn" style="background:linear-gradient(135deg,#dc2626,#b91c1c)">Confirm Cancellation</button>
         </form>
       </div>
     </div>
@@ -374,6 +488,14 @@ app.post('/dashboard/cancel', async (req, res) => {
   if (!s) return res.redirect('/signup');
   await dbCancelSubscription(s.email);
   res.redirect('/dashboard?cancelled=1');
+});
+
+// ── POST /dashboard/toggle-autorenew ─────────────────────────────────────────
+app.post('/dashboard/toggle-autorenew', async (req, res) => {
+  const s = getSession(req);
+  if (!s) return res.redirect('/signup');
+  await dbToggleAutoRenew(s.email);
+  res.redirect('/dashboard?toggled=1');
 });
 
 // ── POST /__test__/session ── test-only backdoor ────────────────────────────

@@ -9,20 +9,16 @@ dotenv.config();
  * See https://playwright.dev/docs/test-configuration.
  */
 export default defineConfig({
+  globalSetup: require.resolve('./src/fixtures/global.setup'),
   testDir: './src/tests',
   /* Run tests in files in parallel */
-  // IMPORTANT: Must be false with a shared Supabase DB — parallel workers race
-  // on beforeEach cleanup, causing one worker to delete rows another just created.
-  fullyParallel: false,
+  fullyParallel: true,
   /* Fail the build on CI if you accidentally left test.only in the source code. */
   forbidOnly: !!process.env.CI,
   /* Retry on CI only */
   retries: process.env.CI ? 2 : 0,
-  /* Single worker — required by shared Supabase DB. Every test suite uses
-   * beforeEach to clean all tables; running parallel workers would cause
-   * cross-test data deletion races. All npm scripts also pass --workers=1
-   * explicitly for clarity. */
-  workers: 1,
+  /* Maximize concurrency. Tests generate isolated users, so DB handles this perfectly. */
+  workers: process.env.CI ? 4 : undefined,
   /* Reporter to use. See https://playwright.dev/docs/test-reporters */
   reporter: 'html',
   /* Shared settings for all the projects below. See https://playwright.dev/docs/api/class-testoptions. */
@@ -31,9 +27,9 @@ export default defineConfig({
     baseURL: process.env.BASE_URL || 'http://localhost:3000',
 
     /* Collect trace when retrying the failed test. See https://playwright.dev/docs/trace-viewer */
-    trace: 'on-first-retry',
+    trace: 'retain-on-failure',
     screenshot: 'only-on-failure',
-    video: 'on-first-retry',
+    video: 'retain-on-failure',
   },
 
   /* Configure projects for major browsers */

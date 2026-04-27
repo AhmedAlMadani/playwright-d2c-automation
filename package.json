@@ -11,7 +11,8 @@
     "test:api": "playwright test src/tests/api --project=chromium",
     "test:negative": "playwright test src/tests/negative --project=chromium",
     "test:edge": "playwright test src/tests/edge --project=chromium",
-    "test:headed": "playwright test --headed --workers=1",
+    "test:advanced": "playwright test src/tests/advanced --project=chromium",
+    "test:headed": "playwright test --headed",
     "test:report": "playwright show-report",
     "typecheck": "tsc --noEmit",
     "start:mock": "node mock-app/server.js"

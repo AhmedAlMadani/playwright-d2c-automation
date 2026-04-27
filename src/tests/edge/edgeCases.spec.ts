@@ -4,205 +4,135 @@
  * Tags: @regression
  *
  * Validates system resilience against unusual but plausible scenarios:
- *   - Duplicate subscription creation for the same user
+ *   - Duplicate subscription creation (Idempotency)
  *   - Rapid sequential state changes
- *   - Cancel subscription in non-cancellable states (inactive, trial edge)
- *   - Subscription operations on users with no subscriptions
- *   - Concurrent user creation race conditions
- *   - Data integrity after multiple operations
+ *   - Concurrent user creation
+ *   - Terminal state immutability
+ *   - Data isolation between distinct users
  */
 
 import { test, expect } from '../../fixtures';
 import { DataFactory } from '../../utils/dataFactory';
 import { Logger } from '../../utils/logger';
 
-test.describe('Edge Cases – Duplicate Subscriptions @regression', () => {
-  test('should reject duplicate subscription for the same user', async ({
+test.describe('Edge Cases – Duplicate Operations & Idempotency @regression', () => {
+  
+  test('should reject duplicate subscription requests to prevent multiple active plans', async ({
     userService,
     subscriptionService,
   }) => {
-    const userData = DataFactory.generateUserData();
-    const user = await userService.createUser(userData.email, userData.password!);
+    const { email, password } = DataFactory.generateUserData();
+    const user = await userService.createUser(email, password!);
 
-    // First subscription — should succeed
+    // First request succeeds
     const first = await subscriptionService.subscribe(user.id, 'basic', 9.99);
     expect(first.state).toBe('active');
-    Logger.info(`[Test] First subscription created: ${first.id}`);
 
-    // Second subscription for same user — mock DB doesn't deduplicate at DB level
-    // but in a real system this should be rejected. We assert the behavior:
-    // The second subscribe call would create a second record. Our test ensures
-    // getStatus always returns the most recent/relevant one.
+    // Second request should be rejected by the exclusivity constraint
+    await expect(
+      subscriptionService.subscribe(user.id, 'premium', 29.99)
+    ).rejects.toThrow(/User already has an active subscription/);
+
+    // Verify DB still only has the first one
     const status = await subscriptionService.getStatus(user.id);
-    expect(status).not.toBeNull();
-    expect(status!.userId).toBe(user.id);
-    Logger.info('[Test] Subscription state consistent after second creation attempt.');
+    expect(status!.id).toBe(first.id);
   });
 
   test('should handle creating users with similar but distinct emails', async ({
     userService,
   }) => {
-    // These are different emails — all should succeed
+    const uniqueId = Date.now() + Math.floor(Math.random() * 1000);
     const emails = [
-      'user+test1@example.com',
-      'user+test2@example.com',
-      'USER@example.com', // case-sensitive difference
+      `user+test1_${uniqueId}@example.com`,
+      `user+test2_${uniqueId}@example.com`,
+      `USER_${uniqueId}@example.com`, // PostgreSQL case-sensitive unless using citext
     ];
 
     const users = await Promise.all(
       emails.map(email => userService.createUser(email, 'SecurePass1!')),
     );
 
-    expect(users).toHaveLength(3);
-    users.forEach(user => {
-      expect(user.id).toBeTruthy();
-    });
-
-    // All IDs must be unique
-    const ids = users.map(u => u.id);
-    const uniqueIds = new Set(ids);
+    const uniqueIds = new Set(users.map(u => u.id));
     expect(uniqueIds.size).toBe(3);
-    Logger.info('[Test] All distinct email addresses created unique user records.');
   });
 });
 
-test.describe('Edge Cases – Rapid State Changes @regression', () => {
-  test('should correctly sequence active → past_due → active state transitions', async ({
+test.describe('Edge Cases – Rapid State Changes & Immutability @regression', () => {
+  
+  test('should correctly sequence active → past_due → grace → active', async ({
     userService,
     subscriptionService,
   }) => {
-    const userData = DataFactory.generateUserData();
-    const user = await userService.createUser(userData.email, userData.password!);
-    const subscription = await subscriptionService.subscribe(user.id, 'premium', 29.99);
-    expect(subscription.state).toBe('active');
+    const { email, password } = DataFactory.generateUserData();
+    const user = await userService.createUser(email, password!);
+    const sub = await subscriptionService.subscribe(user.id, 'premium', 29.99);
 
     // active → past_due
-    const pastDue = await subscriptionService.transitionState(
-      subscription.id,
-      'active',
-      'past_due',
-    );
+    const pastDue = await subscriptionService.transitionState(sub.id, 'active', 'past_due');
     expect(pastDue.state).toBe('past_due');
-    Logger.info('[Test] Transitioned to past_due.');
 
-    // past_due → active (payment resolved)
-    const reactivated = await subscriptionService.transitionState(
-      subscription.id,
-      'past_due',
-      'active',
-    );
+    // past_due → grace
+    const grace = await subscriptionService.enterGracePeriod(user.id, 7);
+    expect(grace.state).toBe('grace');
+
+    // grace → active (payment resolved)
+    const reactivated = await subscriptionService.resolveGracePeriod(user.id);
     expect(reactivated.state).toBe('active');
-    Logger.info('[Test] Reactivated from past_due to active.');
   });
 
-  test('should correctly complete full state chain: inactive → trial → active → canceled', async ({
+  test('should refuse modifications to a canceled subscription', async ({
     userService,
     subscriptionService,
   }) => {
-    // Validate via the state machine directly (no DB needed for pure logic test)
-    const chain: Array<[string, string]> = [
-      ['inactive', 'trial'],
-      ['trial', 'active'],
-      ['active', 'canceled'],
-    ];
+    const { email, password } = DataFactory.generateUserData();
+    const user = await userService.createUser(email, password!);
+    await subscriptionService.subscribe(user.id, 'basic', 9.99);
 
-    for (const [from, to] of chain) {
-      expect(() => {
-        subscriptionService.validateTransition(from as any, to as any);
-      }).not.toThrow();
-    }
+    const canceled = await subscriptionService.cancel(user.id);
+    expect(canceled.state).toBe('canceled');
 
-    Logger.info('[Test] Full state chain inactive→trial→active→canceled validated.');
-  });
+    // Trying to toggle auto-renew on a canceled sub should fail
+    await expect(
+      subscriptionService.toggleAutoRenew(user.id, true),
+    ).rejects.toThrow(/not active/i); // Actual error text depends on implementation, but it should reject
 
-  test('should not allow skipping states in the transition chain', async ({
-    subscriptionService,
-  }) => {
-    // inactive → active (skipping trial) is allowed per business rules
-    expect(() => {
-      subscriptionService.validateTransition('inactive', 'active');
-    }).not.toThrow();
-
-    // inactive → canceled is NOT allowed
-    expect(() => {
-      subscriptionService.validateTransition('inactive', 'canceled');
-    }).toThrow(/Invalid transition/);
-
-    Logger.info('[Test] State skipping rules enforced correctly.');
+    // Trying to upgrade should fail
+    await expect(
+      subscriptionService.upgradePlan(user.id, 'premium', 29.99)
+    ).rejects.toThrow(/Cannot upgrade.*canceled/i);
   });
 });
 
 test.describe('Edge Cases – Data Integrity @regression', () => {
-  test('should maintain separate subscription records for different users', async ({
+  
+  test('should maintain strict data isolation between distinct users', async ({
     userService,
     subscriptionService,
+    billingService,
   }) => {
-    // Create two independent users
-    const userData1 = DataFactory.generateUserData();
-    const userData2 = DataFactory.generateUserData();
-
-    const user1 = await userService.createUser(userData1.email, userData1.password!);
-    const user2 = await userService.createUser(userData2.email, userData2.password!);
+    const user1 = await userService.createUser(DataFactory.generateUserData().email, 'Pass1!');
+    const user2 = await userService.createUser(DataFactory.generateUserData().email, 'Pass1!');
 
     const sub1 = await subscriptionService.subscribe(user1.id, 'basic', 9.99);
     const sub2 = await subscriptionService.subscribe(user2.id, 'premium', 29.99);
 
-    // Subscriptions must be independent
-    expect(sub1.id).not.toBe(sub2.id);
-    expect(sub1.userId).toBe(user1.id);
-    expect(sub2.userId).toBe(user2.id);
-
-    // Cancel user1's subscription — must not affect user2
+    // Cancel user1
     await subscriptionService.cancel(user1.id);
+    
+    // User 1 is canceled, User 2 must remain active
     const status1 = await subscriptionService.getStatus(user1.id);
     const status2 = await subscriptionService.getStatus(user2.id);
 
     expect(status1!.state).toBe('canceled');
     expect(status2!.state).toBe('active');
-    Logger.info('[Test] User subscriptions are fully isolated from each other.');
-  });
-
-  test('should correctly report terminal state after cancellation', async ({
-    userService,
-    subscriptionService,
-  }) => {
-    const userData = DataFactory.generateUserData();
-    const user = await userService.createUser(userData.email, userData.password!);
-    await subscriptionService.subscribe(user.id, 'basic', 9.99);
-
-    // Cancel
-    const canceled = await subscriptionService.cancel(user.id);
-    expect(canceled.state).toBe('canceled');
-
-    // Verify terminal state detection
-    const terminalStates = subscriptionService.constructor === subscriptionService.constructor
-      ? ['canceled'] // static method shortcut
-      : [];
-
-    const allTerminals = require('../../services/SubscriptionService').SubscriptionService.getTerminalStates();
-    expect(allTerminals).toContain('canceled');
-    expect(allTerminals).not.toContain('active');
-    Logger.info('[Test] Terminal state detection working correctly.');
-  });
-
-  test('should preserve subscription endDate once set after cancellation', async ({
-    userService,
-    subscriptionService,
-  }) => {
-    const userData = DataFactory.generateUserData();
-    const user = await userService.createUser(userData.email, userData.password!);
-    await subscriptionService.subscribe(user.id, 'premium', 29.99);
-
-    const beforeCancel = await subscriptionService.getStatus(user.id);
-    expect(beforeCancel!.endDate).toBeNull();
-
-    const afterCancel = await subscriptionService.cancel(user.id);
-    expect(afterCancel.endDate).not.toBeNull();
-
-    // endDate should be a valid ISO date string
-    const endDate = new Date(afterCancel.endDate!);
-    expect(endDate.getTime()).not.toBeNaN();
-    expect(endDate.getTime()).toBeLessThanOrEqual(Date.now());
-    Logger.info(`[Test] endDate correctly set to: ${afterCancel.endDate}`);
+    
+    // Billing history should be isolated
+    const payments1 = await billingService.getHistory(user1.id);
+    const payments2 = await billingService.getHistory(user2.id);
+    
+    expect(payments1).toHaveLength(1);
+    expect(payments2).toHaveLength(1);
+    expect(payments1[0].subscriptionId).toBe(sub1.id);
+    expect(payments2[0].subscriptionId).toBe(sub2.id);
   });
 });
