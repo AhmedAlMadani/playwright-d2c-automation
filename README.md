@@ -238,7 +238,9 @@ create table payments (
 
 ### Test Isolation Strategy
 
-Before every test, `beforeEach` calls `cleanDatabase()` which deletes all rows from `payments`, `subscriptions`, and `users` in FK-safe order. No shared state ever leaks between tests.
+Test data isolation is guaranteed through **data partitioning**. Every test generates completely unique user profiles with randomized emails and UUIDs using the `DataFactory`. Because tests never share user accounts, they can safely execute in parallel.
+
+The database is wiped exactly **once** at the start of the CI run (via a dedicated standalone GitHub action job) to prevent unbounded data growth over time. We do not wipe the DB during Playwright execution to prevent race conditions across parallel workers.
 
 ### CI/CD Secrets
 
@@ -343,8 +345,8 @@ Invalid transitions are enforced at the service layer and tested exhaustively in
 
 ## 💡 Design Decisions
 
-### 1. In-Memory Mock Database
-Real HTTP endpoints would require a running server, creating fragile test infrastructure. Instead, `ApiClient` maintains an in-memory store that is **reset before every test** via the fixture `beforeEach` hook. Tests are completely isolated with no flakiness from shared state.
+### 1. Data Partitioning for Parallel Execution
+Traditional end-to-end tests wipe the database in `beforeEach` hooks, which completely breaks parallel execution. This framework uses **Data Partitioning**: every single test creates a new, isolated user with randomized credentials via `DataFactory`. Since tests never share users, they can run fully in parallel across multiple workers and runners without any race conditions.
 
 ### 2. Service Layer Separation
 The prompt requires both an "API layer" and a "service layer". The distinction:
@@ -367,23 +369,26 @@ Playwright's `test.extend()` is used as a lightweight DI container. All page obj
 
 ## 🔧 CI/CD
 
-The pipeline has 4 independent jobs:
+The pipeline is highly optimized for maximum concurrency, breaking jobs into parallel tracks:
 
 ```
 push / PR
     │
     ├── typecheck        # TypeScript gate (fast, ~30s)
     │
-    ├── smoke            # @smoke tests, Chromium only (~2min)
-    │
-    ├── regression       # @regression × {chromium, firefox, webkit} (~10min)
-    │   └── matrix
-    │
-    └── api-tests        # API-only tests, no browser UI (~1min)
+    └── db-cleanup       # Wipes shared Supabase test DB once
+           │
+           ├─► smoke            # @smoke tests, Chromium only
+           │
+           ├─► regression       # @regression matrix (chromium, firefox, webkit)
+           │
+           ├─► api-tests        # API-only tests
+           │
+           └─► advanced-tests   # Time-simulation & edge cases
 ```
 
 - HTML reports uploaded as GitHub Actions artifacts (7–14 day retention)
-- Traces uploaded on failure for debugging
+- Traces uploaded on failure for debugging (`retain-on-failure` configured)
 - Concurrency cancellation prevents stale run queues
 
 ---
